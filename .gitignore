@@ -7,3 +7,7 @@
 # Google OAuth
 credentials.json
 token.json
+
+# Agent Instructions
+directives/
+AGENTS.md
