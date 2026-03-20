@@ -2,11 +2,15 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+import shap
+import matplotlib.pyplot as plt
+from sklearn.pipeline import Pipeline
 
 os.makedirs('.tmp', exist_ok=True)
 
 print("Loading data and model...")
 X_test = pd.read_csv('.tmp/X_test.csv')
+X_train = pd.read_csv('.tmp/X_train.csv')
 model = joblib.load('.tmp/model.pkl')
 
 print("Calculating Probability of Default (PD)...")
@@ -70,4 +74,45 @@ for band in ['Very High Risk', 'High Risk', 'Medium Risk', 'Low Risk', 'Very Low
 with open('.tmp/model_metrics.txt', 'a') as f:
     f.write('\n' + '\n'.join(metrics_update))
 
-print("Scorecard generation complete.")
+print("Computing SHAP values...")
+try:
+    # CalibratedClassifierCV breaks LinearExplainer, so we extract the base logistic model safely
+    if hasattr(model, 'calibrated_classifiers_'):
+        explainer_model = getattr(model.calibrated_classifiers_[0], 'estimator', None)
+        if explainer_model is None:
+            explainer_model = model.calibrated_classifiers_[0].base_estimator
+    else:
+        explainer_model = model
+
+    explainer = shap.LinearExplainer(explainer_model, X_train)
+    shap_values = explainer(X_test)
+except Exception as e:
+    print(f"Fallback due to calibration wrapper: {e}")
+    # Using independent Explainer
+    explainer = shap.Explainer(model.predict, X_train)
+    shap_values = explainer(X_test)
+
+print("Processing SHAP summaries...")
+# Calculate mean absolute SHAP over the test set
+mean_shap = np.abs(shap_values.values).mean(axis=0)
+shap_df = pd.DataFrame({'Feature': X_test.columns, 'Mean_Abs_SHAP': mean_shap})
+shap_df = shap_df.sort_values(by='Mean_Abs_SHAP', ascending=False).reset_index(drop=True)
+
+shap_out = ["=== SHAP FEATURE IMPORTANCE ==="]
+for idx, row in shap_df.iterrows():
+    shap_out.append(f"{idx+1}. {row['Feature']:<30} : {row['Mean_Abs_SHAP']:.4f}")
+
+shap_out.append("\n=== TOP 3 FACTORS DRIVING DEFAULT RISK ===")
+for idx in range(3):
+    shap_out.append(f"- {shap_df.iloc[idx]['Feature']}")
+
+with open('.tmp/shap_summary.txt', 'w') as f:
+    f.write('\n'.join(shap_out))
+
+print("Plotting SHAP summary...")
+plt.figure()
+shap.summary_plot(shap_values, X_test, show=False)
+plt.savefig('.tmp/shap_summary.png', bbox_inches='tight')
+plt.close()
+
+print("Scorecard generation and SHAP analysis complete.")
